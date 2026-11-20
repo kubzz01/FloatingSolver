@@ -4,9 +4,6 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
@@ -31,17 +28,11 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.Button
-import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import org.json.JSONArray
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
 
 class CaptureService : Service() {
@@ -59,11 +50,7 @@ class CaptureService : Service() {
     private var screenH = 0
 
     private var bubble: TextView? = null
-    private var bubbleParams: WindowManager.LayoutParams? = null
     private var selector: SelectView? = null
-    private var panel: View? = null
-    private var panelText: TextView? = null
-    private var lastQuery = ""
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
@@ -103,13 +90,13 @@ class CaptureService : Service() {
     }
 
     private fun startAsForeground() {
-        val channelId = "floating_solver"
+        val channelId = "floating_search"
         val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         nm.createNotificationChannel(
-            NotificationChannel(channelId, "Floating Solver", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(channelId, "Floating Search", NotificationManager.IMPORTANCE_LOW)
         )
         val n: Notification = Notification.Builder(this, channelId)
-            .setContentTitle("Floating Solver aktif")
+            .setContentTitle("Floating Search aktif")
             .setContentText("Tekan lama tombol melayang untuk menutup")
             .setSmallIcon(android.R.drawable.ic_menu_search)
             .build()
@@ -156,8 +143,8 @@ class CaptureService : Service() {
     private fun showBubble() {
         val size = dp(56)
         val tv = TextView(this).apply {
-            text = "AI"
-            textSize = 18f
+            text = "G"
+            textSize = 20f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
             background = GradientDrawable().apply {
@@ -218,12 +205,10 @@ class CaptureService : Service() {
         }
 
         bubble = tv
-        bubbleParams = p
         wm.addView(tv, p)
     }
 
     private fun startSelect() {
-        removePanel()
         if (selector != null) return
         val sv = SelectView(
             this,
@@ -257,6 +242,10 @@ class CaptureService : Service() {
         selector = null
     }
 
+    private fun toast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
     private fun captureArea(rect: Rect) {
         val img = synchronized(lock) {
             val i = latest
@@ -265,7 +254,7 @@ class CaptureService : Service() {
         }
         bubble?.visibility = View.VISIBLE
         if (img == null) {
-            showPanel("Gagal mengambil layar. Coba pilih area lagi.")
+            toast("Gagal mengambil layar. Coba lagi.")
             return
         }
         val full: Bitmap
@@ -290,171 +279,31 @@ class CaptureService : Service() {
         val h = rect.height().coerceIn(1, maxH - t)
         val crop = Bitmap.createBitmap(full, l, t, w, h)
 
-        showPanel("Membaca teks dari area...")
+        toast("Membaca teks...")
         recognizer.process(InputImage.fromBitmap(crop, 0))
             .addOnSuccessListener { result ->
                 val text = result.text.trim()
                 if (text.isEmpty()) {
-                    updatePanel("Teks tidak terbaca. Pilih area yang lebih jelas.")
+                    toast("Teks tidak terbaca. Pilih area yang lebih jelas.")
                 } else {
-                    lastQuery = text
-                    updatePanel("Soal:\n" + text + "\n\nMenanyakan ke AI...")
-                    askAi(text)
+                    openGoogle(text)
                 }
             }
             .addOnFailureListener { e ->
-                updatePanel("OCR gagal: " + e.message)
+                toast("OCR gagal: " + e.message)
             }
     }
 
-    private fun askAi(question: String) {
-        val key = getSharedPreferences("cfg", MODE_PRIVATE).getString("key", "") ?: ""
-        if (key.isEmpty()) {
-            updatePanel("API Key kosong. Buka aplikasi dan isi dulu.")
-            return
-        }
-        Thread {
-            try {
-                val prompt = "Jawab soal berikut dengan jelas dan singkat dalam bahasa Indonesia. " +
-                    "Tulis jawaban akhir di baris terakhir. Soal:\n" + question
-                val url = URL(
-                    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" + key
-                )
-                val conn = url.openConnection() as HttpURLConnection
-                conn.requestMethod = "POST"
-                conn.setRequestProperty("Content-Type", "application/json")
-                conn.doOutput = true
-                conn.connectTimeout = 20000
-                conn.readTimeout = 60000
-
-                val body = JSONObject().put(
-                    "contents",
-                    JSONArray().put(
-                        JSONObject().put(
-                            "parts",
-                            JSONArray().put(JSONObject().put("text", prompt))
-                        )
-                    )
-                )
-                conn.outputStream.use { it.write(body.toString().toByteArray()) }
-
-                val code = conn.responseCode
-                val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-                val resp = stream.bufferedReader().use { it.readText() }
-                if (code !in 200..299) {
-                    handler.post { updatePanel("Error AI (" + code + "):\n" + resp.take(300)) }
-                    return@Thread
-                }
-                val answer = JSONObject(resp)
-                    .getJSONArray("candidates")
-                    .getJSONObject(0)
-                    .getJSONObject("content")
-                    .getJSONArray("parts")
-                    .getJSONObject(0)
-                    .getString("text")
-                    .trim()
-                handler.post {
-                    updatePanel("Soal:\n" + question + "\n\nJawaban AI:\n" + answer)
-                }
-            } catch (e: Exception) {
-                handler.post { updatePanel("Gagal menghubungi AI: " + e.message) }
-            }
-        }.start()
-    }
-
-    private fun makeButton(label: String, onClick: () -> Unit): Button {
-        return Button(this).apply {
-            text = label
-            textSize = 12f
-            setOnClickListener { onClick() }
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-    }
-
-    private fun showPanel(message: String) {
-        removePanel()
-
-        val tv = TextView(this).apply {
-            text = message
-            textSize = 14f
-            setTextColor(Color.WHITE)
-            setPadding(dp(12), dp(12), dp(12), dp(12))
-            setTextIsSelectable(true)
-        }
-        panelText = tv
-
-        val scroll = ScrollView(this).apply {
-            addView(tv)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                (screenH * 0.4f).toInt()
-            )
-        }
-
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            addView(makeButton("Cari Google") { openGoogle() })
-            addView(makeButton("Salin") { copyText() })
-            addView(makeButton("Tutup") { removePanel() })
-        }
-
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            background = GradientDrawable().apply {
-                cornerRadius = dp(16).toFloat()
-                setColor(Color.argb(240, 25, 30, 45))
-            }
-            addView(scroll)
-            addView(row)
-        }
-
-        val p = WindowManager.LayoutParams(
-            screenW - dp(24),
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            y = dp(24)
-        }
-
-        panel = box
-        wm.addView(box, p)
-    }
-
-    private fun updatePanel(message: String) {
-        panelText?.text = message
-    }
-
-    private fun removePanel() {
-        panel?.let {
-            try {
-                wm.removeView(it)
-            } catch (e: Exception) {
-            }
-        }
-        panel = null
-        panelText = null
-    }
-
-    private fun openGoogle() {
-        if (lastQuery.isEmpty()) return
-        val q = URLEncoder.encode(lastQuery.replace("\n", " ").take(250), "UTF-8")
+    private fun openGoogle(text: String) {
+        val clean = text.replace("\n", " ").replace(Regex("\\s+"), " ").trim().take(250)
+        val q = URLEncoder.encode(clean, "UTF-8")
         val i = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=" + q))
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         startActivity(i)
     }
 
-    private fun copyText() {
-        val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("jawaban", panelText?.text ?: ""))
-    }
-
     override fun onDestroy() {
         removeSelector()
-        removePanel()
         bubble?.let {
             try {
                 wm.removeView(it)
